@@ -198,9 +198,19 @@ class WebtopPagination:
 
             # Click navigation button if found
             if nav_button:
-                found, new_direction = await self._click_navigation_button(page, nav_button, direction, pages_checked, target_date)
+                found, new_direction, moved = await self._click_navigation_button(page, nav_button, direction, pages_checked, target_date)
                 if found:
                     return True
+                if not moved:
+                    # Inert edge link: don't burn the page budget re-clicking
+                    # it. Try the opposite direction once, then stop.
+                    logger.debug("No page movement from %s click", direction)
+                    if direction == "forward":
+                        direction = "backward"
+                        visited_pages.clear()
+                        continue
+                    logger.debug("Reached end of pagination in both directions")
+                    break
                 if new_direction != direction:
                     direction = new_direction
                     visited_pages.clear()
@@ -310,36 +320,54 @@ class WebtopPagination:
                     is_visible = await btn.is_visible()
                     logger.debug(f"  Element visible: {is_visible}")
 
-                    # For <a role="button">, check if it's disabled by checking for 'empty' class or disabled attribute
+                    # Disabled check: attributes only. Webtop decorates the
+                    # prev/next week links with an 'empty' class at the edges
+                    # of pagination, but as of 2026-09 the same class also
+                    # appears on ENABLED week links (verified live: clicking an
+                    # 'empty'-classed "next week" link on a past-week page
+                    # navigates forward). The class is therefore not a usable
+                    # disabled signal; a genuinely inert edge link is detected
+                    # by the click handler via page-movement verification.
                     is_disabled = await btn.get_attribute("disabled")
                     aria_disabled = await btn.get_attribute("aria-disabled")
 
-                    # Check if the link has the 'empty' class (which indicates it's disabled in Webtop)
-                    has_empty_class = False
                     try:
                         class_attr = await btn.get_attribute("class")
                         if class_attr:
                             logger.debug(f"  Element class: {class_attr}")
-                            if "empty" in class_attr:
-                                has_empty_class = True
-                                logger.debug("  Element has 'empty' class - disabled")
                     except Exception as e:
                         logger.debug(f"  Could not get class attribute: {e}")
 
-                    if is_visible and not is_disabled and aria_disabled != "true" and not has_empty_class:
+                    if is_visible and not is_disabled and aria_disabled != "true":
                         logger.info(f"Found {direction} navigation button with selector: {selector}")
                         return btn
                     else:
                         logger.debug(
                             f"  Button not usable: visible={is_visible}, "
-                            f"disabled={is_disabled}, aria_disabled={aria_disabled}, "
-                            f"has_empty_class={has_empty_class}"
+                            f"disabled={is_disabled}, aria_disabled={aria_disabled}"
                         )
             except Exception as e:
                 logger.debug(f"Selector '{selector}' failed: {e}")
                 continue
         logger.warning(f"No {direction} navigation button found after trying {len(button_selectors)} selectors")
         return None
+
+    async def _page_position_marker(self, page: Page) -> str:
+        """Best-effort marker identifying which weekly page is shown.
+
+        The toolbar's date-range label is the most reliable signal on this
+        Angular app: date headings are lazy-rendered (and can be missed),
+        while the SPA never changes its URL on week flips. Falls back to
+        the extracted date headings when the toolbar isn't present.
+        """
+        try:
+            text = await page.locator("app-tool-bar .date-range-text").first.text_content()
+            if text and text.strip():
+                return text.strip()
+        except Exception:
+            pass
+        dates = await self.get_dates_on_page(page)
+        return ",".join(d.strftime("%d/%m/%Y") for d in dates)
 
     async def _click_navigation_button(
         self,
@@ -348,12 +376,20 @@ class WebtopPagination:
         direction: str,
         pages_checked: int,
         target_date: datetime,
-    ) -> Tuple[bool, str]:
-        """Click navigation button and check if target date is found."""
+    ) -> Tuple[bool, str, bool]:
+        """Click navigation button and check if target date is found.
+
+        Returns (found, direction, moved): ``moved`` is False when the click
+        left the page on the same weekly view - the link is inert (edge of
+        pagination) and clicking it again is pointless.
+        """
         target_date_str = target_date.strftime(Selectors.DATE_FORMAT_DISPLAY)
+        moved = True  # unknown until the click lands; exceptions keep old behavior
         try:
             direction_text = "forward" if direction == "forward" else "backward"
             logger.info(f"Clicking {direction_text} button (attempt {pages_checked})...")
+
+            marker_before = await self._page_position_marker(page)
 
             # Scroll button into view and wait for it to be ready
             await nav_button.scroll_into_view_if_needed()
@@ -376,7 +412,15 @@ class WebtopPagination:
             # Check if date is now on page
             if await self.find_date_on_page(page, target_date_str):
                 logger.info(f"Target date {target_date_str} found after {pages_checked} navigation steps")
-                return True, direction
+                return True, direction, True
+
+            marker_after = await self._page_position_marker(page)
+            moved = marker_after != marker_before
+            if not moved:
+                logger.info(
+                    f"{direction} navigation click left the page on the same week "
+                    f"({marker_after!r}) - link is inert (edge of pagination)"
+                )
 
             # Update direction if needed based on new dates on page
             new_dates = await self.get_dates_on_page(page)
@@ -393,4 +437,5 @@ class WebtopPagination:
                 direction = "backward"
             else:
                 direction = "forward"
-        return False, direction
+            return False, direction, True
+        return False, direction, moved

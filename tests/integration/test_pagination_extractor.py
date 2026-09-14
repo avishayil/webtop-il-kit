@@ -74,7 +74,7 @@ class TestPaginationExtractorIntegration:
         pagination.get_dates_on_page = AsyncMock(return_value=[datetime(2026, 1, 20), datetime(2026, 1, 21)])
         nav_button = AsyncMock()
         pagination._find_navigation_button = AsyncMock(return_value=nav_button)
-        pagination._click_navigation_button = AsyncMock(return_value=(True, "forward"))
+        pagination._click_navigation_button = AsyncMock(return_value=(True, "forward", True))
 
         # Navigate to target date
         result = await pagination.navigate_to_date_page(mock_page, target_date)

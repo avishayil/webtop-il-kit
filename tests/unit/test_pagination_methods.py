@@ -89,6 +89,28 @@ class TestWebtopPaginationMethods:
         result = await pagination._find_navigation_button(mock_page, "backward")
         assert result is not None
 
+    async def test_find_navigation_button_empty_class_still_found(self, pagination, mock_page):
+        """Regression: Webtop decorates ENABLED week links with an 'empty'
+        class, so the class must not disqualify the button (2026-09: the
+        Sep 6-14 backfill failed because the forward seek skipped the
+        'empty'-classed but working "next week" link)."""
+        next_button = AsyncMock()
+        next_button.count = AsyncMock(return_value=1)
+        next_button.is_visible = AsyncMock(return_value=True)
+
+        async def get_attr(name):
+            return {
+                "disabled": None,
+                "aria-disabled": None,
+                "class": "empty link-text vertical-align",
+            }[name]
+
+        next_button.get_attribute = AsyncMock(side_effect=get_attr)
+        mock_page.locator.return_value.first = next_button
+
+        result = await pagination._find_navigation_button(mock_page, "forward")
+        assert result is not None
+
     async def test_find_navigation_button_disabled(self, pagination, mock_page):
         """Unit test: when navigation button is disabled."""
         disabled_button = AsyncMock()
